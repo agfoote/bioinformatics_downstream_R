@@ -1,0 +1,540 @@
+---
+title: "Single Cell RNA-Seq : 08-CellChat analysis"
+author: "Alexander G Foote"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+      keep_md: TRUE
+      toc: TRUE
+---
+[Tutorial](http://geneontology.org/docs/ontology-documentation/)
+
+```{r include=FALSE}
+knitr::opts_chunk$set(width = 450, error = FALSE, warning = FALSE, message = FALSE)
+```
+
+## Set up workspace
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(CellChat)
+library(patchwork)
+library(future)
+library(NMF)
+library(ggalluvial)
+options(stringsAsFactors = FALSE)
+# reticulate::use_python("/Users/suoqinjin/anaconda3/bin/python", required=T) 
+set.seed(12345)
+```
+
+## Part I: Data input & processing and initialization of CellChat object
+
+CellChat requires two user inputs: one is the gene expression data of cells, and the other is either user assigned cell labels (i.e., label-based mode) or a low-dimensional representation of the single-cell data (i.e., label-free mode). For the latter, CellChat automatically groups cells by building a shared neighbor graph based on the cell-cell distance in the low-dimensional space or the pseudotemporal trajectory space. 
+
+```{r}
+scRNA_epi <- readRDS("/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds/scRNA_epi_rpca_refined_annotated_7152024.rds") 
+scRNA_epi@meta.data
+scRNA_immune <- readRDS("/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds/scRNA_immune_rpca_refined_annotated_8272024.rds")
+scRNA_immune@meta.data
+
+#B6_immune.annotated : B6_epi.annotated
+args <- commandArgs(T)
+
+id1 <- basename(args[1])
+name1_full <- strsplit(id1, ".", fixed=TRUE)[[1]]
+name1 <- "B6_immune.annotated"
+
+id2 <- basename(args[2])
+name2_full <- strsplit(id2, ".", fixed=TRUE)[[1]]
+name2 <- "B6_epi.annotated"
+```
+
+### Prep data for CellChat interactions from two interested cell populations
+
+```{r}
+#Epi
+Idents(scRNA_epi) <- "CellType"
+DimPlot(scRNA_epi,pt.size=1,label=TRUE,label.size=5)
+#Immune
+Idents(scRNA_immune) <- "CellType"
+DimPlot(scRNA_immune,pt.size=1,label=TRUE,label.size=5)
+#Epi vs immune
+epi_immune_IAV <- merge(scRNA_immune, y = scRNA_epi, add.cell.ids = c(name1, name2), project = paste("cellchat",name1,name2,sep="-"),merge.data = TRUE)
+```
+
+### Create CellChat object
+
+```{r}
+options(stringsAsFactors = FALSE)
+data.input <- GetAssayData(epi_immune_IAV, assay = "RNA", slot = "data")
+labels <- Idents(epi_immune_IAV)
+meta <- data.frame(group = labels, row.names = names(labels)) 
+cellchat_epi.immune <- createCellChat(object = data.input, meta = meta, group.by = "group")
+```
+Users can filter out the cell-cell communication if there are only few cells in certain cell groups. By default, the minimum number of cells required in each cell group for cell-cell communication is 10. We will set it to 3, since some of our rare cell types have ~20 cells.
+
+### Set the ligand-receptor interaction database and preprocess the expression data for cell-cell communication analysis.
+
+```{r}
+cellchatDB <- CellChatDB.mouse
+CellChatDB.use <- cellchatDB
+cellchat_epi.immune@DB <- CellChatDB.use
+
+cellchat_epi.immune <- subsetData(cellchat_epi.immune)
+future::plan("multisession", workers = 4)
+cellchat_epi.immune <- identifyOverExpressedGenes(cellchat_epi.immune)
+cellchat_epi.immune <- identifyOverExpressedInteractions(cellchat_epi.immune)
+```
+
+## Part II: Inference of cell-cell communication network: compute communication probability and save CellChat rds
+
+* CellChat infers the biologically significant cell-cell communication by assigning each interaction with a probability value and performing a permutation test. CellChat models the probability of cell-cell communication by integrating gene expression with prior known knowledge of the interactions between signaling ligands, receptors and their cofactors using the law of mass action.
+
+* The number of inferred ligand-receptor pairs clearly depends on the **method for calculating the average gene expression per cell group**. By default, CellChat uses a statistically robust mean method called 'trimean', which produces fewer interactions than other methods. However, we find that CellChat performs well at predicting stronger interactions, which is very helpful for narrowing down on interactions for further experimental validations. In `computeCommunProb`, we provide an option for using other methods, such as 5% and 10% truncated mean, to calculating the average gene expression. Of note, 'trimean' approximates 25% truncated mean, implying that the average gene expression is zero if the percent of expressed cells in one group is less than 25%. To use 10% truncated mean, USER can set `type = "truncatedMean"` and `trim = 0.1`. To determine a proper value of trim, CellChat provides a function `computeAveExpr`, which can help to check the average expression of signaling genes of interest, e.g, `computeAveExpr(cellchat, features = c("CXCL12","CXCR4"), type =  "truncatedMean", trim = 0.1)`. Therefore, if well-known signaling pathways in the studied biological process are not predicted, users can try `truncatedMean` with lower values of `trim` to change the method for calculating the average gene expression per cell group. 
+
+* When analyzing unsorted single-cell transcriptomes, under the assumption that abundant cell populations tend to send collectively stronger signals than the rare cell populations, CellChat can also consider the effect of cell proportion in each cell group in the probability calculation. USER can set `population.size = TRUE`. 
+
+##Calculate cell-cell interactions
+```{r}
+options(future.globals.maxSize = 2 * 1024^3) # 2 GB
+cellchat_epi.immune <- computeCommunProb(cellchat_epi.immune, type =  "truncatedMean", trim = 0.25, raw.use = TRUE)  #adjust the trim value here to ensure the interested signaling comes out
+cellchat_epi.immune <- filterCommunication(cellchat_epi.immune, min.cells = 3) #adjust min.cells here
+cellchat_epi.immune <- computeCommunProbPathway(cellchat_epi.immune)
+cellchat_epi.immune <- aggregateNet(cellchat_epi.immune)
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+saveRDS(cellchat_epi.immune, file = paste("cellchat_",name1,"-",name2,".rds",sep=""))
+```
+
+### Open saved rds (if needed)
+
+```{r}
+cellchat_epi.immune <- readRDS('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/rds/cellchat_B6_immune.annotated-B6_epi.annotated.rds')
+```
+
+## Part III: Visualization of cell-cell communication networks
+Upon inferring the cell-cell communication network, CellChat provides various functionality for further data exploration, analysis, and visualization.
+
+* It provides several ways for visualizing cell-cell communication network, including hierarchical plot, circle plot, Chord diagram, and bubble plot. 
+
+* It provides an easy-to-use tool for extracting and visualizing high-order information of the inferred networks. For example, it allows ready prediction of major signaling inputs and outputs for cell populations and how these populations and signals coordinate together for functions.
+
+* It can quantitatively characterize and compare the inferred cell-cell communication networks using an integrated approach by combining social network analysis, pattern recognition, and manifold learning approaches.
+
+### Visualize the number of interactions or interaction strength between any two cell groups
+
+```{r}
+groupSize <- as.numeric(table(cellchat_epi.immune@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat_epi.immune@net$weight, vertex.weight = groupSize, weight.scale = T,  vertex.label.cex = .5, label.edge= F, title.name = "Interaction weights/strength")
+netVisual_circle(cellchat_epi.immune@net$count, vertex.weight = groupSize, weight.scale = T,  vertex.label.cex = .5, label.edge= F, title.name = "Number of interactions")
+
+mat <- cellchat_epi.immune@net$weight
+```
+
+### Visualize each signaling pathway using Hierarchy plot, Circle plot or Chord diagram
+
+**Hierarchy plot**: USER should define `vertex.receiver`, which is a numeric vector giving the index of the cell groups as targets in the left part of hierarchy plot. This hierarchical plot consist of two components: the left portion shows autocrine and paracrine signaling to certain cell groups of interest (i.e, the defined `vertex.receiver`), and the right portion shows autocrine and paracrine signaling to the remaining cell groups in the dataset. Thus, hierarchy plot provides an informative and intuitive way to visualize autocrine and paracrine signaling communications between cell groups of interest. For example, when studying the cell-cell communication between fibroblasts and immune cells, USER can define `vertex.receiver` as all fibroblast cell groups. 
+
+**Chord diagram**: CellChat provides two functions `netVisual_chord_cell` and `netVisual_chord_gene` for visualizing cell-cell communication with different purposes and different levels. `netVisual_chord_cell` is used for visualizing the cell-cell communication between different cell groups (where each sector in the chord diagram is a cell group), and `netVisual_chord_gene` is used for visualizing the cell-cell communication mediated by mutiple ligand-receptors or signaling pathways (where each sector in the chord diagram is a ligand, receptor or signaling pathway.)
+
+**Explanations of edge color/weight, node color/size/shape**: In all visualization plots, edge colors are consistent with the sources as sender, and edge weights are proportional to the interaction strength. Thicker edge line indicates a stronger signal. In the **Hierarchy plot and Circle plot**, circle sizes are proportional to the number of cells in each cell group. In the hierarchy plot, solid and open circles represent source and target, respectively. In the **Chord diagram**, the inner thinner bar colors represent the targets that receive signal from the corresponding outer bar. The inner bar size is proportional to the signal strength received by the targets. Such inner bar is helpful for interpreting the complex chord diagram. Note that there exist some inner bars without any chord for some cell groups, please just ignore it because this is an issue that has not been addressed by [circlize](https://github.com/jokergoo/circlize) package. 
+
+**Visualization of cell-cell communication at different levels**: One can visualize the inferred communication network of signaling pathways using `netVisual_aggregate`, and visualize the inferred communication networks of individual L-R pairs associated with that signaling pathway using `netVisual_individual`.
+
+Here we take input of one signaling pathway as an example. All the signaling pathways showing significant communications can be accessed by `cellchat@netP$pathways`.
+
+### Define pathways of interest
+
+```{r}
+cellchat_epi.immune@netP$pathways
+levels(cellchat_epi.immune@idents)
+
+cxcl.pathway <- c("CXCL") 
+ccl.pathway <- c("CCL") 
+TNF.pathway <- c("TNF") 
+RANKL.pathway <- c("RANKL") 
+IL1.pathway <- c("IL1") 
+IL2.pathway <- c("IL2") 
+IL16.pathway <- c("IL16") 
+IFN.II.pathway <- c("IFN-II") 
+WNT.pathway <- c("WNT") 
+TGFb.pathway <- c("TGFb") 
+NOTCH.pathway <- c("NOTCH") 
+CD45.pathway <- c("CD45") 
+MHCI.pathway <- c("MHC-I")
+MHCII.pathway <- c("MHC-II")
+NPY.pathway <- c("NPY") 
+Netrin.pathway <- c("Netrin") 
+NT.pathway <- c("NT") 
+```
+
+### Circle plot
+
+```{r}
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = cxcl.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = ccl.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = TNF.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = RANKL.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = IL1.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IL2.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = IL16.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IFN.II.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = WNT.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = TGFb.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = NOTCH.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = CD45.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = MHCI.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = MHCII.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+par(mfrow=c(1,2))
+netVisual_aggregate(cellchat_epi.immune, signaling = Netrin.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = NT.pathway, layout = "circle", title.space = 1.5, vertex.label.cex =.5)
+```
+
+### Chord diagram
+
+```{r}
+#print
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_source-TNFpathway-signal-all_chord.pdf",sep=""))
+netVisual_aggregate(cellchat_epi.immune, signaling = TNF.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_source-RANKLpathway-signal-all_chord.pdf",sep=""))
+netVisual_aggregate(cellchat_epi.immune, signaling = RANKL.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_source-IL1apathway-signal-all_chord.pdf",sep=""))
+netVisual_aggregate(cellchat_epi.immune, signaling = IL1.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_source-WNTpathway-signal-all_chord.pdf",sep=""))
+netVisual_aggregate(cellchat_epi.immune, signaling = WNT.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+dev.off()
+#visualize
+par(mfrow=c(1,1))
+netVisual_aggregate(cellchat_epi.immune, signaling = cxcl.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = ccl.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = TNF.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = RANKL.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IL1.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IL2.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IL16.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = IFN.II.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = WNT.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = TGFb.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = NOTCH.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = CD45.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = MHCI.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+netVisual_aggregate(cellchat_epi.immune, signaling = MHCII.pathway, layout = "chord", title.space = 1.5, vertex.label.cex =.5)
+```
+
+### Heatmaps
+
+```{r}
+#print
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-cxclpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = cxcl.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-cclpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = ccl.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-TNFpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = TNF.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-RANKLpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = RANKL.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-IL1pathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = IL1.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-IL2pathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = IL2.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-IL16pathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = IL16.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-IFNpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = IFN.II.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-WNTpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = WNT.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-TGFbpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = TGFb.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-NOTCHpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = NOTCH.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-CD45pathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = CD45.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-MHCIpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = MHCI.pathway, color.heatmap = "Reds")
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-MHCIIpathway-signal-all_heatmap.pdf",sep=""))
+netVisual_heatmap(cellchat_epi.immune, signaling = MHCII.pathway, color.heatmap = "Reds")
+dev.off()
+#Visualize
+par(mfrow=c(1,1))
+netVisual_heatmap(cellchat_epi.immune, signaling = cxcl.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = ccl.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = TNF.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = RANKL.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = IL1.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = IL2.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = IL16.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = IFN.II.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = WNT.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = TGFb.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = NOTCH.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = CD45.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = MHCI.pathway, color.heatmap = "Reds")
+netVisual_heatmap(cellchat_epi.immune, signaling = MHCII.pathway, color.heatmap = "Reds")
+```
+
+### River analysis to identify signaling pathways
+
+```{r}
+### Compute the network centrality scores
+cellchat_epi.immune <- netAnalysis_computeCentrality(cellchat_epi.immune, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication 
+
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/plots')
+pdf(paste(name,"_Kcluster_outcoming.pdf",sep=""))
+selectK(cellchat_epi.immune, pattern = "outgoing")
+dev.off()
+pdf(paste(name,"_commupattern_outgoing.pdf",sep=""))
+nPatterns =7
+cellchat_epi.immune <- identifyCommunicationPatterns(cellchat_epi.immune, pattern = "outgoing", k = nPatterns,font.size =3)
+dev.off()
+tiff("_commupattern_outgoing-river.tiff",units="in", width=4, height=11, res=300)
+netAnalysis_river(cellchat_epi.immune, pattern = "outgoing",font.size =2)
+dev.off()
+
+pdf(paste(name,"_Kcluster_incoming.pdf",sep=""))
+selectK(cellchat_epi.immune, pattern = "incoming")
+dev.off()
+pdf(paste(name,"_commupattern_incoming.pdf",sep=""))
+nPatterns =8
+cellchat_epi.immune <- identifyCommunicationPatterns(cellchat_epi.immune, pattern = "incoming", k = nPatterns,font.size =2)
+dev.off()
+tiff("_commupattern_incoming-river.tiff",units="in", width=4, height=11, res=300)
+netAnalysis_river(cellchat_epi.immune, pattern = "incoming",font.size =3)
+dev.off()
+```
+
+We can also visualize the cell-cell communication mediated by a single ligand-receptor pair. We provide a function `extractEnrichedLR` to extract all the significant interactions (L-R pairs) and related signaling genes for a given signaling pathway.  
+
+```{r}
+#RANKL L-R pathway
+pairLR.RANKL <- extractEnrichedLR(cellchat_epi.immune, signaling = RANKL.pathway, geneLR.return = FALSE)
+LR.show <- pairLR.RANKL[1,] # show one ligand-receptor pair
+#Print
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_EnrichedLR-RANKLpathway-all_chord.pdf",sep=""))
+netVisual_individual(cellchat_epi.immune, signaling = RANKL.pathway, pairLR.use = LR.show, layout = "chord", vertex.label.cex =.5)
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pdf(paste(name,"_EnrichedLR-RANKLpathway-all_circle.pdf",sep=""))
+netVisual_individual(cellchat_epi.immune, signaling = RANKL.pathway, pairLR.use = LR.show, layout = "circle", vertex.label.cex =.6) # Circle plot
+dev.off()
+#Visualize
+netVisual_individual(cellchat_epi.immune, signaling = RANKL.pathway, pairLR.use = LR.show, layout = "circle", vertex.label.cex =.6) # Circle plot
+netVisual_individual(cellchat_epi.immune, signaling = RANKL.pathway, pairLR.use = LR.show, layout = "chord", vertex.label.cex =.5) # Chord diagram
+
+#TNF L-R pathway
+pairLR.TNF <- extractEnrichedLR(cellchat_epi.immune, signaling = TNF.pathway, geneLR.return = FALSE)
+LR.show <- pairLR.TNF[1,]
+#Print
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_EnrichedLR-TNFpathway-all_chord.pdf",sep=""))
+netVisual_individual(cellchat_epi.immune, signaling = TNF.pathway, pairLR.use = LR.show, layout = "chord", vertex.label.cex =.5)
+dev.off()
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_EnrichedLR-TNFpathway-all_circle.pdf",sep=""))
+netVisual_individual(cellchat_epi.immune, signaling = TNF.pathway, pairLR.use = LR.show, layout = "circle", vertex.label.cex =.6)
+dev.off()
+#Visualize
+netVisual_individual(cellchat_epi.immune, signaling = TNF.pathway, pairLR.use = LR.show, layout = "circle", vertex.label.cex =.6) # Circle plot
+netVisual_individual(cellchat_epi.immune, signaling = TNF.pathway, pairLR.use = LR.show, layout = "chord", vertex.label.cex =.5) # Chord diagram
+```
+
+### Compute the contribution of each L-R pair to the overall signaling pathway and visualize cell-cell communication mediated by a single L-R pair
+
+```{r}
+netAnalysis_contribution(cellchat_epi.immune, signaling = cxcl.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = ccl.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = RANKL.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = TNF.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = IL1.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = IL2.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = IL16.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = IFN.II.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = TGFb.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = NOTCH.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = CD45.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = MHCI.pathway)
+netAnalysis_contribution(cellchat_epi.immune, signaling = MHCII.pathway)
+```
+
+### Communication probability of L-R
+
+```{r}
+#CD8+-NKT-like > Cycling repair 
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/plots')
+tiff("_CD8+-source-cycling repair_LRprob_bubble.tiff",units="in", width=7, height=12, res=300)
+netVisual_bubble(cellchat_epi.immune, sources.use = 6, targets.use = c(18), remove.isolate = FALSE)
+#Cycling repair > CD8+-NKT-like
+tiff("_Cyclingrepair-source-CD8+_LRprob_bubble.tiff",units="in", width=7, height=12, res=300)
+netVisual_bubble(cellchat_epi.immune, sources.use = 18, targets.use = c(2,3,4,5,6), remove.isolate = FALSE)
+dev.off()
+#CD8+-NKT-like > Neo-ciliated 
+tiff("_CD8+-source-neociliated_LRprob_bubble.tiff",units="in", width=7, height=12, res=300)
+netVisual_bubble(cellchat_epi.immune, sources.use = 6, targets.use = c(30), remove.isolate = FALSE)
+#Neo-ciliated > CD8+-NKT-like
+tiff("_neociliated-source-CD8+_LRprob_bubble.tiff",units="in", width=7, height=12, res=300)
+netVisual_bubble(cellchat_epi.immune, sources.use = 30, targets.use = c(2,3,4,5,6), remove.isolate = FALSE)
+
+#Neo-ciliated > Neutrophils
+tiff("_neociliated-source-CD8+_LRprob_bubble.tiff",units="in", width=7, height=12, res=300)
+netVisual_bubble(cellchat_epi.immune, sources.use = 30, targets.use = c(8), remove.isolate = FALSE)
+
+
+#Signaling pathway networks
+tiff("_heatplot-CXCL.tiff",units="in", width=7, height=7, res=300)
+netAnalysis_signalingRole_network(cellchat_epi.immune, signaling = "CXCL", width = 8, height = 2.5, font.size = 5)
+dev.off()
+pairLR.CXCL <- extractEnrichedLR(cellchat_epi.immune, signaling = "CXCL", geneLR.return = FALSE)
+LR.show.Cxcl10Cxcr3 <- pairLR.CXCL[4,]
+LR.show.Cxcl2Cxcr2 <- pairLR.CXCL[2,]
+vertex.receiver = c(6,18) # a numeric vector. 
+tiff("_circleplot-CXCL10CXCR3.tiff",units="in", width=7, height=7, res=300)
+netVisual_individual(cellchat_epi.immune, signaling = "CXCL", pairLR.use = LR.show.Cxcl10Cxcr3, layout = "circle",vertex.label.cex=1)
+tiff("_circleplot-CXCL2CXCR2.tiff",units="in", width=7, height=7, res=300)
+netVisual_individual(cellchat_epi.immune, signaling = "CXCL", pairLR.use = LR.show.Cxcl2Cxcr2, layout = "circle",vertex.label.cex=1)
+dev.off()
+tiff("_chordplot-CXCL10CXCR3.tiff",units="in", width=7, height=7, res=300)
+netVisual_individual(cellchat_epi.immune, signaling = "CXCL", pairLR.use = LR.show.Cxcl10Cxcr3, layout = "chord",vertex.label.cex=1)
+tiff("_chordplot-CXCL2CXCR2.tiff",units="in", width=7, height=7, res=300)
+etVisual_individual(cellchat_epi.immune, signaling = "CXCL", pairLR.use = LR.show.Cxcl2Cxcr2, layout = "chord",vertex.label.cex=1)
+dev.off()
+vertex.receiver = seq(6,18)
+tiff("_hierarchyplot-CXCL.tiff",units="in", width=7, height=7, res=300)
+netVisual_aggregate(cellchat_epi.immune, signaling = "CXCL", vertex.receiver = vertex.receiver, layout = "hierarchy")
+dev.off()
+tiff("_hierarchyplot-CXCL_individual.tiff",units="in", width=7, height=7, res=300)
+netVisual_individual(cellchat_epi.immune, signaling = "CXCL", vertex.receiver = vertex.receiver, pairLR.use = LR.show, layout = "hierarchy",vertex.label.cex=1)
+dev.off()
+```
+
+```{r}
+pathways.show <- c("CXCL") 
+name <- "epi_allother_trim025"
+pdf(paste(name,"_signalling_CXCL.pdf",sep=""))
+netVisual_aggregate(cellchat_epi.immune, signaling = pathways.show, layout = "circle")
+dev.off()
+
+pdf(paste(name,"_signalling-Hierarchy_CXCL.pdf",sep=""))
+pathways.show <- c("CXCL") 
+vertex.receiver = c(6,18) # a numeric vector. 
+netVisual_aggregate(cellchat_epi.immune, signaling = pathways.show, vertex.receiver = vertex.receiver, layout = "hierarchy", vertex.size.max = 0.4, vertex.label.cex =0.4)
+dev.off()
+
+pdf(paste(name,"_signalling-Hierarchy_CCL.pdf",sep=""))
+pathways.show <- c("CCL") 
+vertex.receiver = c(6,18) # a numeric vector. 
+netVisual_aggregate(cellchat_epi.immune, signaling = pathways.show, vertex.receiver = vertex.receiver, layout = "hierarchy", vertex.size.max = 0.4, vertex.label.cex =0.4)
+dev.off()
+
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/rds')
+pairLR.CXCL <- extractEnrichedLR(cellchat_epi.immune, signaling = "CXCL", geneLR.return = FALSE)
+LR.show <- pairLR.CXCL[4,]
+pathways.show <- c("CXCL") 
+pdf(paste(name,"_signalling-Hierarchy_CXCL-LR2.pdf",sep=""))
+netVisual_individual(cellchat_epi.immune, signaling = pathways.show, pairLR.use = LR.show, vertex.receiver = vertex.receiver, layout = "hierarchy", vertex.size.max = 0.4, vertex.label.cex =0.4)
+dev.off()
+```
+
+### Major signaling pathways per cell type
+
+```{r}
+#Epi signal --> immune
+#Cycling-repair
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/plots')
+pdf(paste(name,"_source-Cycling-repair_signal-all_chord.pdf",sep=""))
+netVisual_bubble(cellchat_epi.immune, font.size = 12, sources.use = c(18), targets.use = 6, remove.isolate = FALSE,signaling=c("CXCL","CCL","TGFb","BMP","GDF","GDNF","ACTIVIN","WNT","ncWNT","EGF","NRG","FGF","VEGF","IGF","MIF","IL2","IL4","IL1","IL6","IL10","LIFR","OSM","CSF","TNF","LIGHT","VEGI","EDA","RANKL","TWEAK","CD137","BAFF","SPP1","VISFATIN","ANGPTL","ANGPT","MK","PTN","PERIOSTIN","COMPLEMENT","EDN","PARs","KIT","NT","HGF","NT","SEMA3","ANNEXIN","ENHO","GAS","GRN","GALECTIN","PROS","CHEMERIN","SLURP","NOTCH"))
+dev.off()
+
+#Immune signal --> epi
+#CD8+-NKT-like
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_IAV/plots')
+pdf(paste(name,"_source-CD8+NKT-like_signal-all_chord.pdf",sep=""))
+netVisual_bubble(cellchat_epi.immune, font.size = 12, sources.use = c(6), targets.use = 18, remove.isolate = FALSE,signaling=c("CXCL","CCL","TGFb","BMP","GDF","GDNF","ACTIVIN","WNT","ncWNT","EGF","NRG","FGF","VEGF","IGF","MIF","IL2","IL4","IL1","IL6","IL10","LIFR","OSM","CSF","TNF","LIGHT","VEGI","EDA","RANKL","TWEAK","CD137","BAFF","SPP1","VISFATIN","ANGPTL","ANGPT","MK","PTN","PERIOSTIN","COMPLEMENT","EDN","PARs","KIT","NT","HGF","NT","SEMA3","ANNEXIN","ENHO","GAS","GRN","GALECTIN","PROS","CHEMERIN","SLURP","NOTCH"))
+dev.off()
+
+#Immune signal --> epi
+#Gammadelta T
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-gammadelta_signal-all_chord.pdf",sep=""))
+netVisual_chord_gene(cellchat_epi.immune, sources.use = 4, targets.use = c(27,20), lab.cex = 0.3,legend.pos.y = 5,legend.pos.x=6,signaling=c("MHC-I","APP","CypA","LAMININ","GALECTIN","ADGRE","PTN","MIF","COLLAGEN","CDH","CLDN","JAM","CCL","FN1","CD45","ICAM","SEMA4","CEACAM","MHC-II","SIRP","EPHA","PARs","EGF","THBS","WNT","CLEC","SELPLG","TGFb","ANNEXIN","ADGRL","ALCAM","CD6","NOTCH","Cholesterol","CDH1","LCK","THY1","CD86","CD52","CNTN","SEMA3","BMP","CXCL","NECTIN","NRG","AGRN","ADGRG","DESMOSOME","SLIT","MK","TENASCIN","PECAM1","EPHB","CADM","CD80","CD22","GRN","NRXN","IGF","Prostaglandin","GAS","FGF","VISFATIN","BST2","CysLTs","KIT","CSF","Testosterone","COMPLEMENT","TNF","PTPR","IGFBP","L1CAM","PD-L1","CD96","NKG2D","OCLN","OSM","ApoE","KLK","ncWNT","IFN-II","PROS","CD40","IL16","IL1","PECAM2","ICOS","MPZ","SLITRK","12oxoLTB4","GAP","CX3C","FASLG","LXA4","DHEA","Netrin","HSPG","NT","TWEAK","RANKL","LAIR1","DHEAS","IL4","ANGPTL","PVR","UNC5","CD23","CHAD","PTPRM","VEGF","SEMA5","DHT","LIFR","Histamine","ADGRA","SEMA6","FLRT","SLURP","CD200","2-AG","IL2","Desmosterol","ACTIVIN","EDN","CD39","NEGR","NGL","HGF","Glutamate","CD137","VWF","TXA2","Adenosine","CD276" ))
+dev.off()
+#Neutrophil
+name <- "epi_immune_IAV"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_source-neutrophil_signal-all_chord.pdf",sep=""))
+netVisual_chord_gene(cellchat_epi.immune, sources.use = 7, targets.use = c(27,20), lab.cex = 0.3,legend.pos.y = 5,legend.pos.x=6,signaling=c("MHC-I","APP","CypA","LAMININ","GALECTIN","ADGRE","PTN","MIF","COLLAGEN","CDH","CLDN","JAM","CCL","FN1","CD45","ICAM","SEMA4","CEACAM","MHC-II","SIRP","EPHA","PARs","EGF","THBS","WNT","CLEC","SELPLG","TGFb","ANNEXIN","ADGRL","ALCAM","CD6","NOTCH","Cholesterol","CDH1","LCK","THY1","CD86","CD52","CNTN","SEMA3","BMP","CXCL","NECTIN","NRG","AGRN","ADGRG","DESMOSOME","SLIT","MK","TENASCIN","PECAM1","EPHB","CADM","CD80","CD22","GRN","NRXN","IGF","Prostaglandin","GAS","FGF","VISFATIN","BST2","CysLTs","KIT","CSF","Testosterone","COMPLEMENT","TNF","PTPR","IGFBP","L1CAM","PD-L1","CD96","NKG2D","OCLN","OSM","ApoE","KLK","ncWNT","IFN-II","PROS","CD40","IL16","IL1","PECAM2","ICOS","MPZ","SLITRK","12oxoLTB4","GAP","CX3C","FASLG","LXA4","DHEA","Netrin","HSPG","NT","TWEAK","RANKL","LAIR1","DHEAS","IL4","ANGPTL","PVR","UNC5","CD23","CHAD","PTPRM","VEGF","SEMA5","DHT","LIFR","Histamine","ADGRA","SEMA6","FLRT","SLURP","CD200","2-AG","IL2","Desmosterol","ACTIVIN","EDN","CD39","NEGR","NGL","HGF","Glutamate","CD137","VWF","TXA2","Adenosine","CD276" ))
+dev.off()
+```
+
+#### Session information
+
+```{r}
+sessionInfo()
+```
