@@ -1,0 +1,368 @@
+---
+title: "Single Cell RNA-Seq : 09-GSEA Hallmark Pathways Analysis"
+author: "Alexander G Foote"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+      keep_md: TRUE
+      toc: TRUE
+---
+
+```{r setup_opt, include=FALSE}
+knitr::opts_chunk$set(width = 450, error = FALSE, warning = FALSE, message = FALSE)
+```
+
+## Set up workspace
+```{r}
+library(Seurat)
+library(dplyr)
+library(kableExtra)
+library(data.table)
+library(irGSEA)
+set.seed(12345)
+#irGSEA package
+# install packages from CRAN
+cran.packages <- c("aplot", "BiocManager", "data.table", "devtools", 
+                   "doParallel", "doRNG", "dplyr", "ggfun", "gghalves", 
+                   "ggplot2", "ggplotify", "ggridges", "ggsci", "irlba",
+                   "magrittr", "Matrix", "msigdbr", "pagoda2", "pointr", 
+                   "purrr", "RcppML", "readr", "reshape2", "reticulate", 
+                   "rlang", "RMTstat", "RobustRankAggreg", "roxygen2", 
+                   "Seurat", "SeuratObject", "stringr", "tibble", "tidyr", 
+                   "tidyselect", "tidytree", "VAM")
+
+for (i in cran.packages) {
+  if (!requireNamespace(i, quietly = TRUE)) {
+    install.packages(i, ask = F, update = F)
+  }
+}
+
+# install packages from Bioconductor
+bioconductor.packages <- c("AUCell", "BiocParallel", "ComplexHeatmap", 
+                           "decoupleR", "fgsea", "ggtree", "GSEABase", 
+                           "GSVA", "Nebulosa", "scde", "singscore",
+                           "SummarizedExperiment", "UCell",
+                           "viper","sparseMatrixStats")
+
+for (i in bioconductor.packages) {
+  if (!requireNamespace(i, quietly = TRUE)) {
+    BiocManager::install(i, ask = F, update = F)
+  }
+}
+
+# install packages from Github
+if (!requireNamespace("irGSEA", quietly = TRUE)) { 
+    devtools::install_github("chuiqin/irGSEA", force =T)
+}
+
+# gficf need RcppML (version > 0.3.7) package
+if (!utils::packageVersion("RcppML") > "0.3.7") {
+  message("The version of RcppML should greater than 0.3.7 and install RcppML package from Github")
+  devtools::install_github("zdebruine/RcppML", force =T)
+}
+
+# please first `library(RcppML)` if you want to perform gficf
+if (!requireNamespace("gficf", quietly = TRUE)) { 
+    devtools::install_github("gambalab/gficf", force =T)
+}
+
+# GSVApy and ssGSEApy need SeuratDisk package
+if (!requireNamespace("SeuratDisk", quietly = TRUE)) { 
+    devtools::install_github("mojaveazure/seurat-disk", force =T)
+}
+
+# sargent
+if (!requireNamespace("sargent", quietly = TRUE)) { 
+    devtools::install_github("Sanofi-Public/PMCB-Sargent", force =T)
+}
+
+# pagoda2 need scde package
+if (!requireNamespace("scde", quietly = TRUE)) { 
+  devtools::install_github("hms-dbmi/scde", force =T)
+}
+```
+
+## Import annotated cell populations, check meta.data
+```{r}
+scRNA_epi <- readRDS("/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/rds/scRNA_epi_rpca_refined_annotated_de_282024.rds")
+scRNA_epi@meta.data
+scRNA_immune <- readRDS("/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/rds/scRNA_immune_rpca_refined_annotated_de_282024.rds")
+scRNA_immune@meta.data
+```
+
+## Plot annotated umap
+```{r}
+# plot
+DimPlot(scRNA_epi, reduction = "umap",
+        group.by = "CellType",label = T) + NoLegend() 
+DimPlot(scRNA_immune, reduction = "umap",
+        group.by = "CellType",label = T) + NoLegend() 
+```
+
+## 2. Hallmark Pathway Enrichment of Genes Expressed in a Cluster
+```{r}
+scRNA_epi <- irGSEA.score(object = scRNA_epi, assay = "RNA", 
+                             slot = "data", seeds = 123, ncores = 1,
+                             min.cells = 3, min.feature = 0,
+                             custom = F, geneset = NULL, msigdb = T, 
+                             species = "mouse", category = "H",  
+                             subcategory = NULL, geneid = "symbol",
+                             method = c("AUCell", "UCell", "singscore", 
+                                        "ssgsea", "JASMINE", "viper"),
+                             aucell.MaxRank = NULL, ucell.MaxRank = NULL, 
+                             kcdf = 'Gaussian')
+scRNA_immune <- irGSEA.score(object = scRNA_immune, assay = "RNA", 
+                             slot = "data", seeds = 123, ncores = 1,
+                             min.cells = 3, min.feature = 0,
+                             custom = F, geneset = NULL, msigdb = T, 
+                             species = "mouse", category = "H",  
+                             subcategory = NULL, geneid = "symbol",
+                             method = c("AUCell", "UCell", "singscore", 
+                                        "ssgsea", "JASMINE", "viper"),
+                             aucell.MaxRank = NULL, ucell.MaxRank = NULL, 
+                             kcdf = 'Gaussian')
+```
+
+##Integrate differential gene set
+```{r}
+Seurat::Assays(scRNA_epi)
+result.epi.dge <- irGSEA.integrate(object = scRNA_epi, 
+                               group.by = "CellType",
+                               metadata = NULL, col.name = NULL,
+                               method = c("AUCell","UCell","singscore",
+                                          "ssgsea", "JASMINE", "viper"))
+Seurat::Assays(scRNA_immune)
+result.immune.dge <- irGSEA.integrate(object = scRNA_immune, 
+                               group.by = "CellType",
+                               metadata = NULL, col.name = NULL,
+                               method = c("AUCell","UCell","singscore",
+                                          "ssgsea", "JASMINE", "viper"))
+```
+
+##Heatmap plot
+```{r}
+irGSEA.heatmap.epi.plot <- irGSEA.heatmap(object = result.epi.dge, 
+                                      method = "RRA",
+                                      top = 50, 
+                                      show.geneset = NULL)
+irGSEA.heatmap.epi.plot
+
+irGSEA.heatmap.immune.plot <- irGSEA.heatmap(object = result.immune.dge, 
+                                      method = "RRA",
+                                      top = 50, 
+                                      show.geneset = NULL)
+irGSEA.heatmap.immune.plot
+```
+
+##Bubble.bar plots
+```{r}
+#Epi
+irGSEA.bubble.epi.plot <- irGSEA.bubble(object = result.epi.dge, 
+                                    method = "RRA", 
+                                    top = 50)
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_irGSEA.bubble.plot.pdf",sep=""))
+irGSEA.bubble.epi.plot
+dev.off()
+irGSEA.bubble.epi.plot
+
+irGSEA.barplot.epi.plot <- irGSEA.barplot(object = result.epi.dge,
+                                      method = c("AUCell", "UCell", "singscore",
+                                                 "ssgsea", "JASMINE", "viper", "RRA"))
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_irGSEA.barplot.plot.pdf",sep=""))
+irGSEA.barplot.epi.plot
+dev.off()
+irGSEA.barplot.epi.plot
+
+#Immune
+irGSEA.bubble.immune.plot <- irGSEA.bubble(object = result.immune.dge, 
+                                    method = "RRA", 
+                                    top = 50)
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_irGSEA.bubble.plot.pdf",sep=""))
+irGSEA.bubble.immune.plot
+dev.off()
+irGSEA.bubble.immune.plot
+
+irGSEA.barplot.immune.plot <- irGSEA.barplot(object = result.immune.dge,
+                                      method = c("AUCell", "UCell", "singscore",
+                                                 "ssgsea", "JASMINE", "viper", "RRA"))
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_irGSEA.barplot.plot.pdf",sep=""))
+irGSEA.barplot.immune.plot
+dev.off()
+irGSEA.barplot.immune.plot
+```
+
+##Density scatterplot
+```{r}
+#Epi
+Idents(scRNA_epi) <- "CellType"
+##HALLMARK-INFLAMMATORY-RESPONSE
+scatterplot.epi.hallmark.inflammatory <- irGSEA.density.scatterplot(object = scRNA_epi,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-INFLAMMATORY-RESPONSE",
+                             reduction = "umap")
+scatterplot.epi.hallmark.inflammatory
+halfvlnplot.epi.hallmark.inflammatory <- irGSEA.halfvlnplot(object = scRNA_epi,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-INFLAMMATORY-RESPONSE")
+halfvlnplot.epi.hallmark.inflammatory
+##HALLMARK-INTERFERON-ALPHA-RESPONSE
+scatterplot.epi.hallmark.inter.a.response <- irGSEA.density.scatterplot(object = scRNA_epi,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-INTERFERON-ALPHA-RESPONSE",
+                             reduction = "umap")
+scatterplot.epi.hallmark.inter.a.response
+scatterplot.epi.hallmark.inter.a.response <- irGSEA.halfvlnplot(object = scRNA_epi,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-INTERFERON-ALPHA-RESPONSE")
+scatterplot.epi.hallmark.inter.a.response
+##HALLMARK-IL6-JAK-STAT3-SIGNALING
+scatterplot.epi.hallmark.IL6.jak.stat3 <- irGSEA.density.scatterplot(object = scRNA_epi,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-IL6-JAK-STAT3-SIGNALING",
+                             reduction = "umap")
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL6-jak-stat3.hallmark.pathway.scatterplot.pdf",sep=""))
+scatterplot.epi.hallmark.IL6.jak.stat3
+dev.off()
+scatterplot.epi.hallmark.IL6.jak.stat3
+
+halfvlnplot.epi.hallmark.IL6.jak.stat3 <- irGSEA.halfvlnplot(object = scRNA_epi,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-IL6-JAK-STAT3-SIGNALING")
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL6-jak-stat3.hallmark.pathway.vlnplot.pdf",sep=""))
+halfvlnplot.epi.hallmark.IL6.jak.stat3
+dev.off()
+halfvlnplot.epi.hallmark.IL6.jak.stat3
+##HALLMARK-TNFA-SIGNALING-VIA-NFKB
+scatterplot.epi.hallmark.TNFa.nfkb <- irGSEA.density.scatterplot(object = scRNA_epi,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-TNFA-SIGNALING-VIA-NFKB",
+                             reduction = "umap")
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_tnfa-nfkb.pathway.scatterplot.pdf",sep=""))
+scatterplot.epi.hallmark.TNFa.nfkb
+dev.off()
+scatterplot.epi.hallmark.TNFa.nfkb
+halfvlnplot.epi.hallmark.TNFa.nfkb <- irGSEA.halfvlnplot(object = scRNA_epi,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-TNFA-SIGNALING-VIA-NFKB")
+name <- "epi"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_tnfa-nfkb.pathway.vlnplot.pdf",sep=""))
+halfvlnplot.epi.hallmark.TNFa.nfkb
+dev.off()
+halfvlnplot.epi.hallmark.TNFa.nfkb
+##HALLMARK-EPITHELIAL-MESENCHYMAL-TRANSITION
+scatterplot.hallmark.epi_mesen.trans <- irGSEA.density.scatterplot(object = scRNA_epi,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-EPITHELIAL-MESENCHYMAL-TRANSITION",
+                             reduction = "umap")
+scatterplot.hallmark.epi_mesen.trans
+halfvlnplot.hallmark.epi_mesen.trans <- irGSEA.halfvlnplot(object = scRNA_epi,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-EPITHELIAL-MESENCHYMAL-TRANSITION")
+halfvlnplot.hallmark.epi_mesen.trans
+
+#Immune
+Idents(scRNA_immune) <- "CellType"
+##HALLMARK-INFLAMMATORY-RESPONSE
+scatterplot.immune.hallmark.inflammatory <- irGSEA.density.scatterplot(object = scRNA_immune,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-INFLAMMATORY-RESPONSE",
+                             reduction = "umap")
+scatterplot.immune.hallmark.inflammatory
+halfvlnplot.immune.hallmark.inflammatory <- irGSEA.halfvlnplot(object = scRNA_immune,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-INFLAMMATORY-RESPONSE")
+halfvlnplot.immune.hallmark.inflammatory
+##HALLMARK-INTERFERON-ALPHA-RESPONSE
+scatterplot.immune.hallmark.inter.a.response <- irGSEA.density.scatterplot(object = scRNA_immune,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-INTERFERON-ALPHA-RESPONSE",
+                             reduction = "umap")
+scatterplot.immune.hallmark.inter.a.response
+scatterplot.immune.hallmark.inter.a.response <- irGSEA.halfvlnplot(object = scRNA_immune,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-INTERFERON-ALPHA-RESPONSE")
+scatterplot.immune.hallmark.inter.a.response
+##HALLMARK-IL6-JAK-STAT3-SIGNALING
+scatterplot.immune.hallmark.IL6.jak.stat3 <- irGSEA.density.scatterplot(object = scRNA_immune,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-IL6-JAK-STAT3-SIGNALING",
+                             reduction = "umap")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL6-jak-stat3.hallmark.pathway.scatterplot.pdf",sep=""))
+scatterplot.immune.hallmark.IL6.jak.stat3
+dev.off()
+scatterplot.immune.hallmark.IL6.jak.stat3
+
+halfvlnplot.immune.hallmark.IL6.jak.stat3 <- irGSEA.halfvlnplot(object = scRNA_immune,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-IL6-JAK-STAT3-SIGNALING")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL6-jak-stat3.hallmark.pathway.vlnplot.pdf",sep=""))
+halfvlnplot.immune.hallmark.IL6.jak.stat3
+dev.off()
+halfvlnplot.immune.hallmark.IL6.jak.stat3
+##HALLMARK-TNFA-SIGNALING-VIA-NFKB
+scatterplot.immune.hallmark.TNFa.nfkb <- irGSEA.density.scatterplot(object = scRNA_immune,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-TNFA-SIGNALING-VIA-NFKB",
+                             reduction = "umap")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_tnfa-nfkb.pathway.scatterplot.pdf",sep=""))
+scatterplot.immune.hallmark.TNFa.nfkb
+dev.off()
+scatterplot.immune.hallmark.TNFa.nfkb
+halfvlnplot.immune.hallmark.TNFa.nfkb <- irGSEA.halfvlnplot(object = scRNA_immune,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-TNFA-SIGNALING-VIA-NFKB")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_tnfa-nfkb.pathway.vlnplot.pdf",sep=""))
+halfvlnplot.immune.hallmark.TNFa.nfkb
+dev.off()
+halfvlnplot.immune.hallmark.TNFa.nfkb
+##HALLMARK-IL2-JAK-STAT5-SIGNALING
+scatterplot.immune.hallmark.IL2.stat5 <- irGSEA.density.scatterplot(object = scRNA_immune,
+                             method = "UCell",
+                             show.geneset = "HALLMARK-IL2-STAT5-SIGNALING",
+                             reduction = "umap")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL2-stat5.hallmark.pathway.scatterplot.pdf",sep=""))
+scatterplot.immune.hallmark.IL2.stat5
+dev.off()
+scatterplot.immune.hallmark.IL2.stat5
+
+halfvlnplot.immune.hallmark.IL2.stat5 <- irGSEA.halfvlnplot(object = scRNA_immune,
+                                  method = "UCell",
+                                  show.geneset = "HALLMARK-IL2-STAT5-SIGNALING")
+name <- "immune"
+setwd('/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/plots')
+pdf(paste(name,"_IL2-stat5.hallmark.pathway.vlnplot.pdf",sep=""))
+halfvlnplot.immune.hallmark.IL2.stat5
+dev.off()
+halfvlnplot.immune.hallmark.IL2.stat5
+```
+
+### Session information
+```{r}
+sessionInfo()
+```
+
