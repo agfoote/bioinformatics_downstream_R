@@ -50,12 +50,12 @@ head(counts(scRNA_epi_saline_trajectory))
 
 ## Retrieve clustering information from seurat object
 ```{r}
-recreate.partitions <- c(rep(1, length(cds@colData@rownames)))
-names(recreate.partitions) <- cds@colData@rownames
+recreate.partitions <- c(rep(1, length(scRNA_epi_saline_trajectory@colData@rownames)))
+names(recreate.partitions) <- scRNA_epi_saline_trajectory@colData@rownames
 recreate.partitions <- as.factor(recreate.partitions)
 recreate.partitions
 
-cds@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partitions
+scRNA_epi_saline_trajectory@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partitions
 ```
 
 ## Set up Monocle3 using SeuratWrappers
