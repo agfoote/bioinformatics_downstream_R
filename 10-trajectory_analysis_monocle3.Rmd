@@ -1,7 +1,7 @@
 ---
-title: "Single Cell RNA-Seq : 10-Trajectory Analysis"
+title: "09-trajectory_analysis_coding_basal-myo"
 author: "Alexander G. Foote"
-date: "2024-02-26"
+date: "2024-10-28"
 output: html_document
 ---
 
@@ -11,213 +11,174 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ## Set up workspace
-```{r}
-library(monocle3)
+```{r workspace}
 library(Seurat)
+library(dplyr)
+library(tidyverse)
+library(monocle3)
 library(SeuratWrappers)
+library(ggplot2)
+library(ggridges)
 library(patchwork)
 set.seed(12345)
 ```
 
-## Import integrated datasets, check metadata
-```{r}
-scRNA_epi <- readRDS("/Users/alexanderfoote/R_Projects/scRNA_analysis_7dpi_postIAV/rds/scRNA_epi_rpca_refined_annotated_2192024.rds")
-scRNA_epi@meta.data
+### Import integrated datasets, check metadata
+```{r Import/metadata}
+IAV_induced_new <- readRDS("/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/rds/scRNA_epi_sub_IAV_induced_new_project_4162025_v2.rds") 
 
-scRNA_epi_saline <- readRDS("/Users/alexanderfoote/R_Projects/Upper_Airway_Coding_Project/rds/scRNA_epi_saline_rpca_refined_annotated_782024.rds")
-scRNA_epi_saline@meta.data
+IAV_induced_new@meta.data 
 ```
 
-## Plot annotated umap
-```{r}
-DimPlot(scRNA_epi, reduction = "umap",
-        group.by = "CellType",label = T) + NoLegend() 
-DimPlot(scRNA_epi_saline, reduction = "umap",
+### Plot annotated umap
+```{r plot UMAP}
+Idents(IAV_induced_new) <- "CellType"
+DimPlot(IAV_induced_new, reduction = "umap",
         group.by = "CellType",label = T) + NoLegend() 
 ```
 
-## Converting seuratobject to celldataset object for Monocle3
-```{r}
-#CODING dataset
-scRNA_epi_saline_trajectory <- as.cell_data_set(scRNA_epi_saline)
-head(colData(scRNA_epi_saline_trajectory))
-fData(scRNA_epi_saline_trajectory)
-rownames(fData(scRNA_epi_saline_trajectory))[1:10]
-fData(scRNA_epi_saline_trajectory)$gene_short_name <- rownames(fData(scRNA_epi_saline_trajectory))
-head(fData(scRNA_epi_saline_trajectory))
-head(counts(scRNA_epi_saline_trajectory))
+# Converting seuratobject to celldataset object for Monocle3
+```{r Get cell metadata}
+cds <- as.cell_data_set(IAV_induced_new)
+head(colData(cds))
+fData(cds)
+rownames(fData(cds))[1:10]
+fData(cds)$gene_short_name <- rownames(fData(cds))
+head(fData(cds))
+head(counts(cds))
 ```
 
-## Retrieve clustering information from seurat object
-```{r}
-recreate.partitions <- c(rep(1, length(scRNA_epi_saline_trajectory@colData@rownames)))
-names(recreate.partitions) <- scRNA_epi_saline_trajectory@colData@rownames
+# Retrieve clustering information from seurat object
+```{r Setting up Seurat object for Monocle3 analysis}
+#Assign partitions
+recreate.partitions <- c(rep(1, length(cds@colData@rownames)))
+names(recreate.partitions) <- cds@colData@rownames
 recreate.partitions <- as.factor(recreate.partitions)
 recreate.partitions
 
-scRNA_epi_saline_trajectory@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partitions
+cds@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partitions
+
+#Assign cluster info
+list.cluster <- IAV_induced_new@active.ident
+cds@clusters@listData[["UMAP"]][["clusters"]] <- list.cluster
+
+#Assign UMAP coordinates
+cds@int_colData@listData[["reducedDims"]]@listData[["UMAP"]] <- IAV_induced_new@reductions$umap@cell.embeddings
 ```
 
-## Set up Monocle3 using SeuratWrappers
-```{r}
-#FLU dataset
-scRNA_epi_trajectory <- as.cell_data_set(scRNA_epi)
-scRNA_epi_trajectory <- cluster_cells(scRNA_epi_trajectory, resolution=1e-3)
+# Plot & Learn Trajectory
+```{r }
+cluster.before.traj <-plot_cells(cds, color_cells_by = "cluster", label_groups_by_cluster = F, 
+           group_label_size = 5) + theme(legend.position = "right")
 
-p1 <- plot_cells(scRNA_epi_trajectory, color_cells_by = "cluster", show_trajectory_graph = FALSE)
-p2 <- plot_cells(scRNA_epi_trajectory, color_cells_by = "partition", show_trajectory_graph = FALSE)
-wrap_plots(p1, p2)
+cluster.before.traj
 
-#CODING dataset
-scRNA_epi_saline_trajectory <- as.cell_data_set(scRNA_epi_saline)
-scRNA_epi_saline_trajectory <- cluster_cells(scRNA_epi_saline_trajectory, resolution=1e-2)
+#Learn trajectory
+cds <- learn_graph(cds, use_partition = T)
 
-p1 <- plot_cells(scRNA_epi_saline_trajectory, color_cells_by = "cluster", show_trajectory_graph = FALSE)
-p2 <- plot_cells(scRNA_epi_saline_trajectory, color_cells_by = "partition", show_trajectory_graph = FALSE)
-wrap_plots(p1, p2)
-```
-
-## learn-graph
-```{r}
-#FLU dataset
-scRNA_epi_trajectory <- learn_graph(scRNA_epi_trajectory, use_partition = TRUE, verbose = FALSE)
-#CODING dataset
-scRNA_epi_saline_trajectory <- learn_graph(scRNA_epi_saline_trajectory, use_partition = FALSE, verbose = FALSE)
-```
-
-## Plot cells
-```{r}
-#FLU dataset
-plot_cells(scRNA_epi_trajectory,
-           color_cells_by = "cluster",
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE)
-#CODING dataset
-plot_cells(scRNA_epi_saline_trajectory,
+##print
+name <- "epi_basal-cycling-repair_trajectory"
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+pdf(paste(name,"_scRNA_.pdf",sep=""))
+plot_cells(cds,
            color_cells_by = "cluster",
            label_groups_by_cluster=FALSE,
            label_branch_points = FALSE,
            label_leaves=FALSE,
-           label_roots = TRUE,
-           group_label_size = 5)
+           label_roots = F,
+           group_label_size = 7)
+dev.off()
+##plot
+plot_cells(cds,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=FALSE,
+           label_branch_points = FALSE,
+           label_leaves=FALSE,
+           label_roots = FALSE,
+           group_label_size = 7)
 ```
 
-## Cell trajectory by basal cell type
+#Order cells in Pseudotime
 ```{r}
-#FLU PAPER DATASET
-#Basal-squamous trajectory
-setwd('/Users/alexanderfoote/R_Projects/Upper_Airway_Coding_Project/plots')
-pdf(paste(name,"_scRNA_epi_trajectory_basal-squamous.pdf",sep=""))
-scRNA_epi_trajectory <- order_cells(scRNA_epi_trajectory, root_cells = colnames(scRNA_epi_trajectory[,clusters(scRNA_epi_trajectory) == 13]))
-plot_cells(scRNA_epi_trajectory,
+#Tajectory
+cds <- order_cells(cds)
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+pdf(paste(name,"_scRNA_.pdf",sep=""))
+plot_cells(cds,
            color_cells_by = "pseudotime",
            group_cells_by = "cluster",
            label_cell_groups = FALSE,
            label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
+           label_leaves=F,
            label_branch_points=FALSE,
            label_roots = FALSE,
+           cell_size = 1,
            trajectory_graph_color = "grey60")
 dev.off()
-
-#CODING PAPER DATASET
-#Basal-larynx trajectory
-name <- "epi-saline_trajectory"
-setwd('/Users/alexanderfoote/R_Projects/Upper_Airway_Coding_Project/plots')
-pdf(paste(name,"_scRNA_epi_basal-larynx.pdf",sep=""))
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 15]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-dev.off()
-#Parabasal-larynx trajectory
-name <- "epi-saline_trajectory"
-setwd('/Users/alexanderfoote/R_Projects/Upper_Airway_Coding_Project/plots')
-pdf(paste(name,"_scRNA_epi_basal-larynx.pdf",sep=""))
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 21]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-dev.off()
-#Basal-trachea trajectory
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 5]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-
-#Basal-myoepithelial trajectory
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 22]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-
-#Serous-acini trajectory
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 14]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-
-#Club-distal trajectory
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 9]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
-
-#Club-proximal trajectory
-scRNA_epi_saline_trajectory <- order_cells(scRNA_epi_saline_trajectory, root_cells = colnames(scRNA_epi_saline_trajectory[,clusters(scRNA_epi_saline_trajectory) == 1]))
-plot_cells(scRNA_epi_saline_trajectory,
-           color_cells_by = "pseudotime",
-           group_cells_by = "cluster",
-           label_cell_groups = FALSE,
-           label_groups_by_cluster=FALSE,
-           label_leaves=FALSE,
-           label_branch_points=FALSE,
-           label_roots = FALSE,
-           trajectory_graph_color = "grey60")
 ```
 
-## Identify genes that change as a function of pseudotime
+#Cells ordered by Monocle3 Pseudotime
 ```{r}
-cds_graph_test_results <- graph_test(scRNA_epi_saline_trajectory,
-                                     neighbor_graph = "principal_graph",
-                                     cores = 8)
+head(pseudotime(cds), 10)
 
-trace('calculateLW', edit = T, where = asNamespace('monocle3'))
+cds$monocle3_pseudotime <- pseudotime(cds)
+data.pseudo <- as.data.frame(colData(cds))
+
+ggplot(data.pseudo, aes(monocle3_pseudotime, CellType, fill = CellType)) + geom_boxplot()
+
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+tiff("_data.pseudo_basal.tiff",units="in", width=9, height=9, res=300)
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(CellType, monocle3_pseudotime), fill = CellType)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  ) +
+  labs(
+    title = "Pseudotime Distribution by Cell Type",
+    x = "Monocle3 Pseudotime",
+    y = "Cell Type"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+dev.off()
 ```
+
+#Find genes that change as a function of pseudotime
+```{r plots}
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+tiff("_monocle3_pseudotime_basal.tiff",units="in", width=7, height=7, res=300)
+integrated.sub <- as.Seurat(cds, assay = NULL)
+FeaturePlot(integrated.sub, "monocle3_pseudotime")
+dev.off()
+
+deg <- graph_test(cds, neighbor_graph = "principal_graph", cores =8)
+
+deg %>% arrange(q_value) %>% filter(status == "OK") %>% head()
+pr_deg_ids <- row.names(subset(deg, q_value < 0.05)) 
+pr_deg_ids
+
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+tiff("_UMAP_Myc.tiff",units="in", width=7, height=7, res=300)
+plot_cells(cds, 
+           genes=c("Myc"),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           cell_size=1.5,  # Increase dot size (default is usually 0.5-1)
+           alpha=0.8,      # Adjust transparency for better visibility
+           cell_stroke=0.2)
+dev.off()
+
+setwd('/Users/alexanderfoote/dev/Projs/R/scRNA_analysis_7dpi_IAV/plots')
+tiff("_ridgeplots.tiff",units="in", width=9, height=6, res=300)
+RidgePlot(sub_cyclingrepair, features = c("Myc"), sort = T, idents = c("Basal","Goblet","Club","Differentiating-Club","Luminal-Hillock"))
+dev.off()
+
+my_genes <- row.names(subset(fData(cds), gene_short_name %in% c("Myc"))) 
+cds_subset <- cds[my_genes,]
+plot_genes_in_pseudotime(cds_subset, color_cells_by = "monocle3_pseudotime" )
+```
+
+
